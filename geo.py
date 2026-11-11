@@ -1,5 +1,5 @@
 # Geodesy & DIS (IEEE 1278.1) conversion reference
-# Frames: geodetic (deg) / ECEF (m) / local ENU,NED (m/s). DIS floats are f32.
+# Frames: geodetic (deg) / ECEF (m) / local ENU, NED (m/s). DIS floats are f32.
 import math
 import struct
 
@@ -19,9 +19,9 @@ indata = {
     "LAT"          : "38.292583",
     "LNG"          : "-76.293300",
     "ALT_FT"       : "28000",
-    "ECEF_X"       : None,   # MSL METERS
-    "ECEF_Y"       : None,   # MSL METERS
-    "ECEF_Z"       : None,   # MSL METERS
+    "ECEF_X"       : None,   # meters
+    "ECEF_Y"       : None,   # meters
+    "ECEF_Z"       : None,   # meters
     "ENU_VEL_E_MPS": None,   # east velocity (m/s)
     "ENU_VEL_N_MPS": None,   # north velocity (m/s)
     "ENU_VEL_U_MPS": None,   # up velocity (m/s)
@@ -43,7 +43,7 @@ def geodetic_to_ecef(lat_deg, lon_deg, height_m):
 
 
 def ecef_to_geodetic(x, y, z):
-    """WGS-84 ECEF x, y, z (m) -> lat, lon (deg), height above ellipsoid."""
+    """WGS-84 ECEF x, y, z (m) -> lat, lon (deg), ellipsoidal height (m)."""
     lon = math.atan2(y, x)
     p = math.hypot(x, y)
     # Bowring's closed-form solution for geodetic latitude
@@ -84,7 +84,7 @@ def course_speed_to_enu(course_deg, speed_mps, vertical_mps=0.0):
 
 
 def enu_to_course_speed(enu_mps):
-    """ENU velocity (m/s) -> course (deg), ground speed (m/s), vertical."""
+    """ENU velocity (m/s) -> course (deg), ground speed (m/s), vertical (m/s)."""
     e, n, u = enu_mps
     course = math.degrees(math.atan2(e, n)) % 360.0
     return course, math.hypot(e, n), u
@@ -162,7 +162,7 @@ def ned_to_ecef(ned, lat_deg, lon_deg):
 
 
 def ecef_to_ned(ecef, lat_deg, lon_deg):
-    """Rotate an ECEF vector into the local NED frame (units preserved)."""
+    """Rotate an ECEF vector into NED (pure rotation; units preserved)."""
     e, n, u = ecef_velocity_to_enu(ecef, lat_deg, lon_deg)
     return n, e, -u
 
@@ -205,24 +205,24 @@ def dis_orientation_to_heading(lat_deg, lon_deg, psi, theta, phi):
 # worked example on the inputs above
 # ======================================================================
 
-# altitude feet -> meters
+# --- altitude: feet -> meters ---
 alt_meters = float(indata["ALT_FT"]) * FT_TO_M
 print(f"Alt in feet {indata['ALT_FT']} to {alt_meters:.3f} meters")
 
+# --- position: geodetic -> ECEF ---
 lat = float(indata["LAT"])
 lon = float(indata["LNG"])
 
-# Fill placeholder ECEF from lat/lon/MSL altitude (feed values pass through).
+# Fill placeholder ECEF from lat/lon/alt (feed values pass through).
 if indata["ECEF_X"] is None:
     indata["ECEF_X"], indata["ECEF_Y"], indata["ECEF_Z"] = geodetic_to_ecef(
         lat, lon, alt_meters
     )
 
 x, y, z = (float(indata[k]) for k in ("ECEF_X", "ECEF_Y", "ECEF_Z"))
-print(f"ECEF (M) {x:.3f} {y:.3f} {z:.3f}")
+print(f"ECEF (m): X {x:.3f}  Y {y:.3f}  Z {z:.3f}")
 
-# --- velocity: ENU <-> raw speed <-> DIS ---
-
+# --- velocity: ENU <-> course/speed <-> DIS ---
 # Fill placeholder ENU velocity (feed values pass through).
 enu_keys = ("ENU_VEL_E_MPS", "ENU_VEL_N_MPS", "ENU_VEL_U_MPS")
 if indata["ENU_VEL_E_MPS"] is None:
