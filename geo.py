@@ -1,4 +1,5 @@
 import math
+import struct
 
 # WGS-84 ellipsoid constants
 WGS84_A = 6378137.0                     # semi-major axis (m)
@@ -19,13 +20,17 @@ FT_TO_M = 0.3048                        # exact, by definition of the foot
 GEOID_UNDULATION_M = -35.8850
 
 indata = {
-    "COURSE": "83",
-    "LAT"   : "38.292583",
-    "LNG"   : "-76.293300",
-    "ALT_FT": "28000",
-    "ECEF_X": None,   # MSL METERS
-    "ECEF_Y": None,   # MSL METERS
-    "ECEF_Z": None,   # MSL METERS
+    "COURSE"       : "83",
+    "SPEED_KTS"    : "200",
+    "LAT"          : "38.292583",
+    "LNG"          : "-76.293300",
+    "ALT_FT"       : "28000",
+    "ECEF_X"       : None,   # MSL METERS
+    "ECEF_Y"       : None,   # MSL METERS
+    "ECEF_Z"       : None,   # MSL METERS
+    "ENU_VEL_E_MPS": None,   # east velocity (m/s)
+    "ENU_VEL_N_MPS": None,   # north velocity (m/s)
+    "ENU_VEL_U_MPS": None,   # up velocity (m/s)
 }
 
 
@@ -46,7 +51,7 @@ def geodetic_to_ecef(lat_deg, lon_deg, height_m):
 
 
 def ecef_to_geodetic(x, y, z):
-    """WGS-84 ECEF x, y, z (m) -> lat, lon (deg), height above ellipsoid (m)."""
+    """WGS-84 ECEF x, y, z (m) -> lat, lon (deg), height above ellipsoid."""
     lon = math.atan2(y, x)
     p = math.hypot(x, y)
     # Bowring's closed-form solution for geodetic latitude
@@ -61,6 +66,86 @@ def ecef_to_geodetic(x, y, z):
         1 - WGS84_E2 * sin_lat**2
     )
     return math.degrees(lat), math.degrees(lon), h
+
+
+# --- speed units ---
+# 1 knot = 1852 m / 3600 s, 1 mph = 1609.344 m / 3600 s (both exact)
+KT_TO_MPS = 1852 / 3600
+MPH_TO_MPS = 1609.344 / 3600
+SPEED_TO_MPS = {"mps": 1.0, "kts": KT_TO_MPS, "mph": MPH_TO_MPS}
+
+
+def convert_speed(value, unit_from, unit_to):
+    """Convert a scalar speed between 'mps', 'kts', and 'mph'."""
+    return value * SPEED_TO_MPS[unit_from] / SPEED_TO_MPS[unit_to]
+
+
+# --- velocity in the local ENU frame ---
+def course_speed_to_enu(course_deg, speed_mps, vertical_mps=0.0):
+    """Course (deg clockwise from true north) + speed -> ENU velocity (m/s)."""
+    c = math.radians(course_deg)
+    return (
+        speed_mps * math.sin(c),   # east
+        speed_mps * math.cos(c),   # north
+        vertical_mps,              # up
+    )
+
+
+def enu_to_course_speed(enu_mps):
+    """ENU velocity (m/s) -> course (deg), ground speed (m/s), vertical."""
+    e, n, u = enu_mps
+    course = math.degrees(math.atan2(e, n)) % 360.0
+    return course, math.hypot(e, n), u
+
+
+# --- ENU <-> DIS world velocity ---
+# DIS (IEEE 1278.1) linear velocity is an X/Y/Z vector, in m/s, in the
+# world coordinate system: right-handed geocentric Cartesian, WGS-84 --
+# i.e. the ECEF frame. Each component is a 32-bit float on the wire.
+def enu_to_ecef_velocity(enu_mps, lat_deg, lon_deg):
+    """Rotate local ENU velocity into the DIS world (ECEF) frame, m/s."""
+    e, n, u = enu_mps
+    lat, lon = math.radians(lat_deg), math.radians(lon_deg)
+    sin_lat, cos_lat = math.sin(lat), math.cos(lat)
+    sin_lon, cos_lon = math.sin(lon), math.cos(lon)
+    return (
+        -sin_lon * e - sin_lat * cos_lon * n + cos_lat * cos_lon * u,
+        cos_lon * e - sin_lat * sin_lon * n + cos_lat * sin_lon * u,
+        cos_lat * n + sin_lat * u,
+    )
+
+
+def ecef_velocity_to_enu(ecef_mps, lat_deg, lon_deg):
+    """Rotate DIS world (ECEF) velocity into the local ENU frame, m/s.
+
+    Inverse of enu_to_ecef_velocity: the rotation is orthonormal, so
+    this applies its transpose.
+    """
+    x, y, z = ecef_mps
+    lat, lon = math.radians(lat_deg), math.radians(lon_deg)
+    sin_lat, cos_lat = math.sin(lat), math.cos(lat)
+    sin_lon, cos_lon = math.sin(lon), math.cos(lon)
+    return (
+        -sin_lon * x + cos_lon * y,
+        -sin_lat * cos_lon * x - sin_lat * sin_lon * y + cos_lat * z,
+        cos_lat * cos_lon * x + cos_lat * sin_lon * y + sin_lat * z,
+    )
+
+
+def _f32(x):
+    """Round to IEEE 754 binary32, as carried in a DIS PDU."""
+    return struct.unpack("f", struct.pack("f", x))[0]
+
+
+def enu_to_dis_velocity(enu_mps, lat_deg, lon_deg):
+    """ENU velocity (m/s) -> DIS Linear Velocity record (X, Y, Z, m/s)."""
+    ecef = enu_to_ecef_velocity(enu_mps, lat_deg, lon_deg)
+    return tuple(_f32(v) for v in ecef)
+
+
+def dis_velocity_to_enu(dis_mps, lat_deg, lon_deg):
+    """DIS Linear Velocity record (X, Y, Z, m/s) -> ENU velocity (m/s)."""
+    return ecef_velocity_to_enu(dis_mps, lat_deg, lon_deg)
 
 
 # Convert altitude from feet to meters
@@ -79,7 +164,8 @@ if indata["ECEF_X"] is None:
     )
 
 # Convert ECEF Mean Sea Level in Meters to Height Above Ellipsoid
-x_msl, y_msl, z_msl = (float(indata[k]) for k in ("ECEF_X", "ECEF_Y", "ECEF_Z"))
+ECEF_KEYS = ("ECEF_X", "ECEF_Y", "ECEF_Z")
+x_msl, y_msl, z_msl = (float(indata[k]) for k in ECEF_KEYS)
 
 # 1) ECEF -> geodetic. ECEF->geodetic always returns an ELLIPSOIDAL
 #    height, but these coordinates were built from an MSL altitude, so
@@ -98,3 +184,36 @@ print(f"ECEF MSL (M) {x_msl:.3f} {y_msl:.3f} {z_msl:.3f} "
       f"to ECEF HAE (M) {x_hae:.3f} {y_hae:.3f} {z_hae:.3f}")
 print(f"  {h_msl:.3f} m MSL -> {h_hae:.3f} m HAE "
       f"(geoid undulation N = {GEOID_UNDULATION_M:+.4f} m)")
+
+# --- velocity: ENU <-> raw speed <-> DIS ---
+
+# fill in the placeholder ENU velocity: COURSE 83 at 200 kts, level
+# flight (feed-supplied values pass straight through)
+enu_keys = ("ENU_VEL_E_MPS", "ENU_VEL_N_MPS", "ENU_VEL_U_MPS")
+if indata["ENU_VEL_E_MPS"] is None:
+    speed_mps = convert_speed(float(indata["SPEED_KTS"]), "kts", "mps")
+    enu = course_speed_to_enu(float(indata["COURSE"]), speed_mps)
+    for key, val in zip(enu_keys, enu):
+        indata[key] = val
+
+enu_vel = tuple(float(indata[k]) for k in enu_keys)
+e, n, u = enu_vel
+print(f"ENU velocity (m/s): E {e:.4f}  N {n:.4f}  U {u:.4f}")
+
+course, gs_mps, _ = enu_to_course_speed(enu_vel)
+print(f"  course {course:.2f} deg  speed "
+      f"{convert_speed(gs_mps, 'mps', 'kts'):.2f} kts  "
+      f"{convert_speed(gs_mps, 'mps', 'mph'):.2f} mph  "
+      f"{gs_mps:.2f} m/s")
+
+dis_vel = enu_to_dis_velocity(enu_vel, lat, lon)
+dx, dy, dz = dis_vel
+print(f"DIS velocity (m/s): X {dx:.4f}  Y {dy:.4f}  Z {dz:.4f}")
+
+# DIS -> ENU -> raw speed: round trip through the DIS record
+back_enu = dis_velocity_to_enu(dis_vel, lat, lon)
+course_rt, gs_rt_mps, _ = enu_to_course_speed(back_enu)
+print(f"DIS -> ENU: course {course_rt:.2f} deg  speed "
+      f"{convert_speed(gs_rt_mps, 'mps', 'kts'):.2f} kts  "
+      f"{convert_speed(gs_rt_mps, 'mps', 'mph'):.2f} mph  "
+      f"{gs_rt_mps:.2f} m/s")
